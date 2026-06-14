@@ -85,6 +85,7 @@ typedef char *nvstring_t;
 #define MIN_LAT_INDEX        10  /* minimum latency index 10 = 1024ns */
 #define POOL_IO_SIZE_MEASUREMENT        "zpool_io_size"
 #define MIN_SIZE_INDEX        9  /* minimum size index 9 = 512 bytes */
+#define POOL_IOSTAT_MEASUREMENT "zpool_iostat"
 
 /*
  * telegraf 1.6.4 can handle uint64, which is the native ZFS type
@@ -111,6 +112,7 @@ int no_histograms = 0;
 int sum_histogram_buckets = 0;
 int timeout_secs = 0;       /* watchdog timeout in seconds, 0 = disabled */
 char *lock_file = NULL;     /* single-instance lock file path, NULL = disabled */
+int iostat_interval = 0;    /* zpool-iostat sampling interval, 0 = disabled */
 uint64_t timestamp = 0;
 
 /*
@@ -789,6 +791,73 @@ print_recursive_stats(stat_printer_f func, nvlist_t *nvroot,
 }
 
 /*
+ * Print per-second pool I/O rates, similar to `zpool iostat`.
+ *
+ * The vdev_stat_t counters (vs_ops, vs_bytes) are cumulative, so a rate
+ * requires two samples. We take a second sample of the top-level (root) vdev
+ * iostat_interval seconds after the first and divide the delta by the elapsed
+ * time reported by vs_timestamp (in nanoseconds), falling back to the
+ * requested interval if the timestamp did not advance. Counter resets (e.g. a
+ * pool re-import) are clamped to zero.
+ *
+ * o_* are the sample-1 values captured by the caller before sleeping.
+ */
+int
+print_pool_iostat(zpool_handle_t *zhp, const char *pool_name,
+                  uint64_t o_read_ops, uint64_t o_write_ops,
+                  uint64_t o_read_bytes, uint64_t o_write_bytes,
+                  uint64_t o_timestamp) {
+    uint_t c;
+    boolean_t missing;
+    nvlist_t *config, *nvroot;
+    vdev_stat_t *vs;
+    double elapsed;
+    struct timespec tv;
+
+    sleep((unsigned int) iostat_interval);
+
+    if (zpool_refresh_stats(zhp, &missing) != 0)
+        return (1);
+    config = zpool_get_config(zhp, NULL);
+    if (nvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE, &nvroot) != 0)
+        return (2);
+    if (nvlist_lookup_uint64_array(nvroot, ZPOOL_CONFIG_VDEV_STATS,
+                                   (uint64_t **) &vs, &c) != 0)
+        return (3);
+
+    /* elapsed seconds, preferring the vdev's own timestamp */
+    if (vs->vs_timestamp > o_timestamp)
+        elapsed = (double) (vs->vs_timestamp - o_timestamp) / 1e9;
+    else
+        elapsed = (double) iostat_interval;
+    if (elapsed <= 0.0)
+        elapsed = (double) iostat_interval;
+
+#define IO_DELTA(new, old) (((new) > (old)) ? ((new) - (old)) : 0)
+    double read_kib = IO_DELTA(vs->vs_bytes[ZIO_TYPE_READ], o_read_bytes) /
+                      1024.0 / elapsed;
+    double write_kib = IO_DELTA(vs->vs_bytes[ZIO_TYPE_WRITE], o_write_bytes) /
+                       1024.0 / elapsed;
+    double read_iops = IO_DELTA(vs->vs_ops[ZIO_TYPE_READ], o_read_ops) /
+                       elapsed;
+    double write_iops = IO_DELTA(vs->vs_ops[ZIO_TYPE_WRITE], o_write_ops) /
+                        elapsed;
+#undef IO_DELTA
+
+    if (clock_gettime(CLOCK_REALTIME, &tv) != 0)
+        timestamp = (uint64_t) time(NULL) * 1000000000;
+    else
+        timestamp = ((uint64_t) tv.tv_sec * 1000000000) + (uint64_t) tv.tv_nsec;
+
+    (void) printf("%s,name=%s,vdev=root ", POOL_IOSTAT_MEASUREMENT, pool_name);
+    (void) printf("read_kib_per_sec=%.2f,write_kib_per_sec=%.2f,"
+                  "read_iops=%.2f,write_iops=%.2f",
+                  read_kib, write_kib, read_iops, write_iops);
+    (void) printf(" %lu\n", timestamp);
+    return (0);
+}
+
+/*
  * call-back to print the stats from the pool config
  *
  * Note: if the pool is broken, this can hang indefinitely and perhaps in an
@@ -833,6 +902,17 @@ print_stats(zpool_handle_t *zhp, void *data) {
 		return (3);
 	}
 
+	/*
+	 * Capture the root vdev's cumulative counters as the first iostat
+	 * sample; zpool_refresh_stats() in print_pool_iostat() will invalidate
+	 * this nvlist, so copy the scalars out now.
+	 */
+	uint64_t io_read_ops = vs->vs_ops[ZIO_TYPE_READ];
+	uint64_t io_write_ops = vs->vs_ops[ZIO_TYPE_WRITE];
+	uint64_t io_read_bytes = vs->vs_bytes[ZIO_TYPE_READ];
+	uint64_t io_write_bytes = vs->vs_bytes[ZIO_TYPE_WRITE];
+	uint64_t io_timestamp = vs->vs_timestamp;
+
 	pool_name = escape_string(zhp->zpool_name);
     err = print_recursive_stats(print_summary_stats, nvroot,
             pool_name, NULL, 1);
@@ -854,6 +934,14 @@ print_stats(zpool_handle_t *zhp, void *data) {
     if (err == 0)
         err = print_scan_status(nvroot, pool_name);
 
+    /*
+     * Must be last: print_pool_iostat() sleeps and refreshes the pool config,
+     * which invalidates nvroot.
+     */
+    if (err == 0 && iostat_interval > 0)
+        err = print_pool_iostat(zhp, pool_name, io_read_ops, io_write_ops,
+                                io_read_bytes, io_write_bytes, io_timestamp);
+
     free(pool_name);
     zpool_close(zhp);
 	return (err);
@@ -863,7 +951,7 @@ print_stats(zpool_handle_t *zhp, void *data) {
 void
 usage(char* name) {
     fprintf(stderr, "usage: %s [--execd][--no-histograms]"
-                    "[--sum-histogram-buckets]"
+                    "[--sum-histogram-buckets][--iostat-interval=SECONDS]"
                     "[--timeout=SECONDS][--lock-file=PATH] [poolname]\n", name);
     exit(EXIT_FAILURE);
 }
@@ -881,9 +969,10 @@ main(int argc, char *argv[]) {
         {"sum-histogram-buckets", no_argument, NULL, 's'},
         {"timeout", required_argument, NULL, 't'},
         {"lock-file", required_argument, NULL, 'l'},
+        {"iostat-interval", required_argument, NULL, 'i'},
         {0, 0, 0, 0}
     };
-    while ((opt = getopt_long(argc, argv, "ehnst:l:", long_options, NULL))
+    while ((opt = getopt_long(argc, argv, "ehnst:l:i:", long_options, NULL))
            != -1) {
         switch (opt) {
             case 'e':
@@ -902,6 +991,11 @@ main(int argc, char *argv[]) {
                 break;
             case 'l':
                 lock_file = optarg;
+                break;
+            case 'i':
+                iostat_interval = atoi(optarg);
+                if (iostat_interval < 0)
+                    iostat_interval = 0;
                 break;
             default:
                 usage(argv[0]);

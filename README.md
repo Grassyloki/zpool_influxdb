@@ -36,6 +36,10 @@ Relative to the upstream repository:
   instance; skip overlapping invocations) and `--timeout` (bound a slow
   sample) options make frequent collection (e.g. telegraf every few seconds)
   safer. See [Caveat Emptor](#caveat-emptor).
+* **Pool I/O rates.** New `--iostat-interval` option emits a `zpool_iostat`
+  measurement with per-second read/write throughput (KiB/s) and IOPS for the
+  pool, computed like `zpool iostat`. See
+  [zpool_iostat Description](#zpool_iostat-description).
 
 Verified building and running on Debian 12 (bookworm, GCC 12.2, ZFS 2.1.11)
 and CachyOS/Arch (GCC 16, ZFS 2.4.2).
@@ -62,6 +66,7 @@ If no poolname is specified, then all pools are sampled.
 | --execd | -e | For use with telegraf's `execd` plugin. When [enter] is pressed, the pools are sampled. To exit, use [ctrl+D] |
 | --no-histogram | -n | Do not print histogram information |
 | --sum-histogram-buckets | -s | Sum histogram bucket values |
+| --iostat-interval=SECONDS | -i | Also emit per-second pool I/O rates (the `zpool_iostat` measurement) by sampling twice, SECONDS apart, like `zpool iostat`. Adds SECONDS of latency per run (0 = disabled, default) |
 | --timeout=SECONDS | -t | Abort a sample that runs longer than SECONDS instead of overrunning the polling interval (0 = disabled, default). See [Caveat Emptor](#caveat-emptor) |
 | --lock-file=PATH | -l | Run at most one instance at a time. If another instance still holds PATH, exit immediately with no output instead of piling up. See [Caveat Emptor](#caveat-emptor) |
 | --help | -h | Print a short usage message |
@@ -93,6 +98,33 @@ The following measurements are collected:
 | zpool_io_size | per-vdev I/O size histogram | zpool iostat -r |
 | zpool_latency | per-vdev I/O latency histogram | zpool iostat -w |
 | zpool_vdev_queue | per-vdev instantaneous queue depth | zpool iostat -q |
+| zpool_iostat | per-second pool read/write throughput and IOPS (only with `--iostat-interval`) | zpool iostat |
+
+### zpool_iostat Description
+The cumulative `read_bytes`/`write_bytes`/`read_ops`/`write_ops` fields in
+`zpool_stats` are counters; the usual way to get a rate is to apply a
+derivative (e.g. influxdb's `non_negative_derivative`) at query time. As a
+convenience, `--iostat-interval=SECONDS` makes _zpool_influxdb_ compute the
+pool-level rates directly the same way `zpool iostat` does: it takes a second
+sample of the top-level vdev counters SECONDS later and divides the delta by
+the elapsed time. This adds SECONDS of latency to each run, so keep the
+interval shorter than your collection interval (and shorter than `--timeout`,
+if set). Rates are reported for the whole pool (`vdev=root`); counter resets
+are clamped to zero.
+
+#### zpool_iostat Tags
+| label | description |
+|---|---|
+| name | pool name |
+| vdev | always `root` (whole-pool totals) |
+
+#### zpool_iostat Fields
+| field | units | description |
+|---|---|---|
+| read_kib_per_sec | KiB/s | read throughput over the sample interval |
+| write_kib_per_sec | KiB/s | write throughput over the sample interval |
+| read_iops | ops/s | read operations per second over the interval |
+| write_iops | ops/s | write operations per second over the interval |
 
 ### zpool_stats Description
 zpool_stats contains top-level summary statistics for the pool.
