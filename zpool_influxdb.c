@@ -51,12 +51,18 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <sys/types.h>
 #include <sys/fs/zfs.h>
 #include <libzfs.h>
 #include <string.h>
 #include <getopt.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <errno.h>
+#include <sys/file.h>
 
 /*
  * The third argument of nvlist_lookup_string() (and the string it returns)
@@ -103,7 +109,72 @@ typedef char *nvstring_t;
 int execd_mode = 0;
 int no_histograms = 0;
 int sum_histogram_buckets = 0;
+int timeout_secs = 0;       /* watchdog timeout in seconds, 0 = disabled */
+char *lock_file = NULL;     /* single-instance lock file path, NULL = disabled */
 uint64_t timestamp = 0;
+
+/*
+ * Watchdog: if a sample takes longer than timeout_secs, give up rather than
+ * overrunning the caller's polling interval. This bounds the common case of a
+ * slow or contended sample. Note: it cannot interrupt a thread wedged in an
+ * uninterruptible kernel ioctl (see "Caveat Emptor" in the README); such a
+ * process can linger until the kernel condition clears.
+ */
+static void
+timeout_handler(int sig) {
+    (void) sig;
+    static const char msg[] =
+        "error: zpool_influxdb sample timed out; pool may be unresponsive\n";
+    (void) write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    _exit(EXIT_FAILURE);
+}
+
+static void
+arm_timeout(void) {
+    if (timeout_secs > 0)
+        (void) alarm((unsigned int) timeout_secs);
+}
+
+static void
+disarm_timeout(void) {
+    if (timeout_secs > 0)
+        (void) alarm(0);
+}
+
+/*
+ * Take a non-blocking exclusive lock on lock_file so that only one instance
+ * runs at a time. When zpool_influxdb is polled frequently (e.g. by telegraf
+ * every few seconds) and a sample runs long -- or wedges on an unresponsive
+ * pool -- this stops new invocations from piling up and contending with the
+ * stuck one. If the lock is already held, exit cleanly with no output so the
+ * caller simply records no data for this interval. If the lock file cannot be
+ * used we warn and continue rather than dropping samples.
+ */
+static void
+acquire_single_instance_lock(void) {
+    int fd;
+
+    if (lock_file == NULL)
+        return;
+
+    fd = open(lock_file, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        (void) fprintf(stderr, "warning: cannot open lock file %s: %s\n",
+                       lock_file, strerror(errno));
+        return;
+    }
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        if (errno == EWOULDBLOCK) {
+            /* another instance is still running; skip this sample */
+            exit(EXIT_SUCCESS);
+        }
+        (void) fprintf(stderr, "warning: cannot lock %s: %s\n",
+                       lock_file, strerror(errno));
+        (void) close(fd);
+        return;
+    }
+    /* leave fd open on purpose: the lock is held until this process exits */
+}
 int complained_about_sync = 0;
 
 /*
@@ -792,7 +863,8 @@ print_stats(zpool_handle_t *zhp, void *data) {
 void
 usage(char* name) {
     fprintf(stderr, "usage: %s [--execd][--no-histograms]"
-                    "[--sum-histogram-buckets] [poolname]\n", name);
+                    "[--sum-histogram-buckets]"
+                    "[--timeout=SECONDS][--lock-file=PATH] [poolname]\n", name);
     exit(EXIT_FAILURE);
 }
 
@@ -807,9 +879,12 @@ main(int argc, char *argv[]) {
         {"help", no_argument, NULL, 'h'},
         {"no-histograms", no_argument, NULL, 'n'},
         {"sum-histogram-buckets", no_argument, NULL, 's'},
+        {"timeout", required_argument, NULL, 't'},
+        {"lock-file", required_argument, NULL, 'l'},
         {0, 0, 0, 0}
     };
-    while ((opt = getopt_long(argc, argv, "ehns", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "ehnst:l:", long_options, NULL))
+           != -1) {
         switch (opt) {
             case 'e':
                 execd_mode = 1;
@@ -820,10 +895,27 @@ main(int argc, char *argv[]) {
             case 's':
                 sum_histogram_buckets = 1;
                 break;
+            case 't':
+                timeout_secs = atoi(optarg);
+                if (timeout_secs < 0)
+                    timeout_secs = 0;
+                break;
+            case 'l':
+                lock_file = optarg;
+                break;
             default:
                 usage(argv[0]);
         }
     }
+
+    /*
+     * Ensure only one instance runs at a time before doing any libzfs work,
+     * then install the watchdog. Both are no-ops unless the corresponding
+     * option was given.
+     */
+    acquire_single_instance_lock();
+    if (timeout_secs > 0)
+        (void) signal(SIGALRM, timeout_handler);
 
 	libzfs_handle_t *g_zfs;
 	if ((g_zfs = libzfs_init()) == NULL) {
@@ -833,11 +925,15 @@ main(int argc, char *argv[]) {
 		exit(EXIT_FAILURE);
 	}
 	if (execd_mode == 0) {
+        arm_timeout();
         ret = zpool_iter(g_zfs, print_stats, argv[optind]);
+        disarm_timeout();
         return (ret);
     }
     while (getline(&line, &len, stdin) != -1) {
+        arm_timeout();
         ret = zpool_iter(g_zfs, print_stats, argv[optind]);
+        disarm_timeout();
         fflush(stdout);
 	}
     return (ret);

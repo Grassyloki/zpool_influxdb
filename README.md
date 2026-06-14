@@ -30,6 +30,10 @@ Relative to the upstream repository:
 * **CPU target option.** A new `TARGET_ARCH` cmake variable controls `-march`
   and defaults to `x86-64-v4`. See
   [Target CPU architecture](#target-cpu-architecture).
+* **Frequent-polling safety options.** New `--lock-file` (run a single
+  instance; skip overlapping invocations) and `--timeout` (bound a slow
+  sample) options make frequent collection (e.g. telegraf every few seconds)
+  safer. See [Caveat Emptor](#caveat-emptor).
 
 Verified building and running on Debian 12 (bookworm, GCC 12.2, ZFS 2.1.11)
 and CachyOS/Arch (GCC 16, ZFS 2.4.2).
@@ -56,6 +60,8 @@ If no poolname is specified, then all pools are sampled.
 | --execd | -e | For use with telegraf's `execd` plugin. When [enter] is pressed, the pools are sampled. To exit, use [ctrl+D] |
 | --no-histogram | -n | Do not print histogram information |
 | --sum-histogram-buckets | -s | Sum histogram bucket values |
+| --timeout=SECONDS | -t | Abort a sample that runs longer than SECONDS instead of overrunning the polling interval (0 = disabled, default). See [Caveat Emptor](#caveat-emptor) |
+| --lock-file=PATH | -l | Run at most one instance at a time. If another instance still holds PATH, exit immediately with no output instead of piling up. See [Caveat Emptor](#caveat-emptor) |
 | --help | -h | Print a short usage message |
 
 #### Histogram Bucket Values
@@ -327,13 +333,43 @@ be restarted to read the config-directory files.
   lock on spa_config for each imported pool. If this lock blocks,
   then the command will also block indefinitely and might be
   unkillable. This is not a normal condition, but can occur if 
-  there are bugs in the kernel modules. 
-  For this reason, care should be taken:
-  * avoid spawning many of these commands hoping that one might 
-    finish
-  * avoid frequent updates or short sample time
-    intervals, because the locks can interfere with the performance
-    of other instances of _zpool_ or _zpool_influxdb_
+  there are bugs in the kernel modules.
+
+  A single wedged sample is a kernel-side condition that no user-space
+  program can reliably interrupt -- a thread stuck in an uninterruptible
+  `ioctl()` cannot be killed by a signal or a timeout. What you *can* avoid
+  is letting frequent polling pile up many of these commands so they
+  contend with each other and make matters worse. This fork adds two options
+  to do exactly that:
+  * `--lock-file=PATH` runs at most one instance at a time. If a previous
+    sample is still running (or wedged), the next invocation exits
+    immediately with no output rather than spawning yet another process.
+  * `--timeout=SECONDS` bounds a sample so a slow-but-recoverable run does
+    not overrun the polling interval. (It cannot break a true kernel wedge,
+    but it handles the common slow/contended case.)
+
+### Recommended usage with telegraf
+When polling frequently (e.g. every few seconds), prefer the `execd` plugin:
+it starts a single long-lived process and samples on each trigger, so it does
+not spawn a new process every interval. Combine it with `--lock-file` and
+`--timeout` (and telegraf's own `timeout`) as belt-and-suspenders:
+```toml
+[[inputs.execd]]
+  command = ["/usr/bin/zpool_influxdb", "--execd",
+             "--lock-file=/run/zpool_influxdb.lock", "--timeout=4"]
+  signal = "STDIN"
+  data_format = "influx"
+```
+If you use the simpler `exec` plugin instead, set its `timeout` below your
+interval and still pass `--lock-file` so overlapping runs are skipped:
+```toml
+[[inputs.exec]]
+  commands = ["/usr/bin/zpool_influxdb --lock-file=/run/zpool_influxdb.lock"]
+  interval = "5s"
+  timeout = "4s"
+  data_format = "influx"
+```
+The lock file path must be writable by the user telegraf runs the command as.
 
 ## Other collectors
 There are a few other collectors for zpool statistics roaming around
