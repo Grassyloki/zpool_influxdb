@@ -28,8 +28,10 @@ Relative to the upstream repository:
 * **Sensible defaults.** `ZFS_INSTALL_BASE` now defaults to `/usr` (matching
   distribution packages); override it for source installs.
 * **CPU target option.** A new `TARGET_ARCH` cmake variable controls `-march`
-  and defaults to `x86-64-v4`. See
-  [Target CPU architecture](#target-cpu-architecture).
+  and defaults to `x86-64-v4`, plus `STRIP_ISA_PROPERTY` for building on a
+  higher-ISA host than the target. See
+  [Target CPU architecture](#target-cpu-architecture) and
+  [Building on one machine to run on another](#building-on-one-machine-to-run-on-another).
 * **Frequent-polling safety options.** New `--lock-file` (run a single
   instance; skip overlapping invocations) and `--timeout` (bound a slow
   sample) options make frequent collection (e.g. telegraf every few seconds)
@@ -311,6 +313,34 @@ target a different level or a fully portable baseline, set _TARGET_ARCH_:
 cmake -D TARGET_ARCH=x86-64-v3 .   # AVX2 baseline
 cmake -D TARGET_ARCH= .             # compiler default (most portable)
 ```
+
+### Building on one machine to run on another
+`libzfs` is dynamically linked and has an unstable ABI, so a binary built on
+one machine has three requirements to run on another:
+
+1. **Matching OpenZFS version.** The binary links a specific `libzfs` SONAME
+   (`libzfs.so.4` for ZFS 2.1, `.so.6` for 2.2, `.so.7` for 2.4). The target
+   must have that same SONAME or it fails at startup with
+   `error while loading shared libraries: libzfs.so.N: cannot open shared
+   object file`. Build on (or against the headers/libs of) the **same OpenZFS
+   version the target runs**. For example, TrueNAS 26 runs ZFS 2.4
+   (`libzfs.so.7`), so build against ZFS 2.4, not Debian 12's ZFS 2.1.
+2. **glibc no newer than the target's.** The build host's glibc symbol
+   versions must be `<=` the target's. Check with
+   `objdump -T zpool_influxdb | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1`.
+3. **A CPU level the target supports.** Set `TARGET_ARCH` to the target's
+   level (see above). Note that on distro variants built for a high ISA level
+   (e.g. CachyOS's `x86-64-v4` repos), the toolchain stamps that level into
+   *every* binary via the startup objects, so the loader rejects it on a
+   lower CPU with `CPU ISA level is lower than required` even when
+   `TARGET_ARCH` is correct. Build with `-D STRIP_ISA_PROPERTY=ON` to remove
+   that gate:
+   ```bash
+   cmake -D TARGET_ARCH=x86-64-v3 -D STRIP_ISA_PROPERTY=ON .
+   make
+   ```
+   This only removes the inherited ISA *requirement* note; the emitted code
+   still uses no instructions above `TARGET_ARCH`.
 
 ## Installing
 Installation is left as an exercise for the reader because

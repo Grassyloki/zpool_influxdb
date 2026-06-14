@@ -17,6 +17,19 @@ set(ZFS_INSTALL_BASE /usr CACHE STRING "zfs installation base directory")
 #      -D TARGET_ARCH=               (compiler default, most portable)
 set(TARGET_ARCH "x86-64-v4" CACHE STRING "value passed to the compiler -march= flag")
 
+# When building on a host whose toolchain stamps a higher x86-64 ISA level into
+# the binary than the deployment target supports -- e.g. building on an
+# x86-64-v4 distro variant (such as CachyOS) for a v3 CPU -- the glibc loader
+# can refuse the binary at startup with "CPU ISA level is lower than required",
+# even with TARGET_ARCH set correctly. That requirement is inherited from the
+# system startup objects (the GNU_PROPERTY_X86_ISA_1_NEEDED note), not your
+# code. Enable this to strip .note.gnu.property after linking so the loader
+# does not enforce an ISA level; the code still only uses TARGET_ARCH
+# instructions. (Prefer building on a host whose baseline ISA is <= the target
+# when you can; this is the escape hatch when you cannot.)
+option(STRIP_ISA_PROPERTY
+       "strip .note.gnu.property so the binary is not gated to the build host's ISA level" OFF)
+
 # to support unsigned 64-bit ints properly, uncomment below to set the
 # SUPPORT_UINT64 flag at compile time.
 # _LARGEFILE64_SOURCE is required so that the libspl headers can use the
@@ -53,4 +66,19 @@ endif()
 add_executable(zpool_influxdb zpool_influxdb.c)
 target_link_libraries(zpool_influxdb zfs nvpair)
 set_property(TARGET zpool_influxdb PROPERTY C_STANDARD 99)
+
+if(STRIP_ISA_PROPERTY)
+    find_program(OBJCOPY NAMES objcopy)
+    if(OBJCOPY)
+        add_custom_command(TARGET zpool_influxdb POST_BUILD
+            COMMAND ${OBJCOPY} --remove-section=.note.gnu.property
+                    $<TARGET_FILE:zpool_influxdb>
+            COMMENT "Stripping .note.gnu.property (build-host ISA level gate)")
+    else()
+        message(WARNING
+            "STRIP_ISA_PROPERTY is ON but objcopy was not found; the binary "
+            "may carry the build host's ISA requirement.")
+    endif()
+endif()
+
 install(TARGETS zpool_influxdb DESTINATION ${ZFS_INSTALL_BASE}/bin)
