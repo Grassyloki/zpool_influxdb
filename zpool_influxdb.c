@@ -58,6 +58,19 @@
 #include <string.h>
 #include <getopt.h>
 
+/*
+ * The third argument of nvlist_lookup_string() (and the string it returns)
+ * gained a const qualifier in OpenZFS 2.2. HAVE_CONST_NVLIST_LOOKUP_STRING is
+ * defined by CMake when building against the newer, const-correct headers.
+ * Use the matching type so the source compiles cleanly on both old (e.g.
+ * Debian 12 / ZFS 2.1) and new (ZFS >= 2.2) libzfs.
+ */
+#ifdef HAVE_CONST_NVLIST_LOOKUP_STRING
+typedef const char *nvstring_t;
+#else
+typedef char *nvstring_t;
+#endif
+
 #define POOL_MEASUREMENT        "zpool_stats"
 #define SCAN_MEASUREMENT        "zpool_scan_stats"
 #define VDEV_MEASUREMENT        "zpool_vdev_stats"
@@ -242,7 +255,7 @@ print_scan_status(nvlist_t *nvroot, const char *pool_name) {
 	              "pass_examined="IFMT",pause_ts="IFMT",paused_t="IFMT","
 	              "pct_done=%.2f,processed="IFMT",rate="IFMT","
 	              "remaining_t="IFMT",start_ts="IFMT","
-	              "to_examine="IFMT",to_process="IFMT" ",
+	              "to_examine="IFMT" ",
 	    MASK_UINT64(ps->pss_end_time),
 	    MASK_UINT64(ps->pss_errors),
 	    MASK_UINT64(examined),
@@ -254,8 +267,7 @@ print_scan_status(nvlist_t *nvroot, const char *pool_name) {
 	    MASK_UINT64(rate),
 	    MASK_UINT64(remaining_time),
 	    MASK_UINT64(ps->pss_start_time),
-	    MASK_UINT64(ps->pss_to_examine),
-	    MASK_UINT64(ps->pss_to_process)
+	    MASK_UINT64(ps->pss_to_examine)
 	);
 	(void) printf("%lu\n", timestamp);
 	return (0);
@@ -268,7 +280,7 @@ print_scan_status(nvlist_t *nvroot, const char *pool_name) {
 char *
 get_vdev_name(nvlist_t *nvroot, const char *parent_name) {
     static char vdev_name[256];
-    char *vdev_type = NULL;
+    nvstring_t vdev_type = NULL;
     uint64_t vdev_id = 0;
 
     if (nvlist_lookup_string(nvroot, ZPOOL_CONFIG_TYPE,
@@ -303,10 +315,10 @@ get_vdev_name(nvlist_t *nvroot, const char *parent_name) {
 char *
 get_vdev_desc(nvlist_t *nvroot, const char *parent_name) {
     static char vdev_desc[2 * MAXPATHLEN];
-    char *vdev_type = NULL;
+    nvstring_t vdev_type = NULL;
     uint64_t vdev_id = 0;
     char vdev_value[MAXPATHLEN];
-    char *vdev_path = NULL;
+    nvstring_t vdev_path = NULL;
     char *s, *t;
 
     if (nvlist_lookup_string(nvroot, ZPOOL_CONFIG_TYPE, &vdev_type) != 0) {
@@ -321,12 +333,12 @@ get_vdev_desc(nvlist_t *nvroot, const char *parent_name) {
     }
 
     if (parent_name == NULL) {
-        s = escape_string(vdev_type);
+        s = escape_string((char *)vdev_type);
         (void) snprintf(vdev_value, sizeof(vdev_value), "vdev=%s", s);
         free(s);
     } else {
         s = escape_string((char *)parent_name);
-        t = escape_string(vdev_type);
+        t = escape_string((char *)vdev_type);
         (void) snprintf(vdev_value, sizeof(vdev_value),
                         "vdev=%s/%s-%lu", s, t, vdev_id);
         free(s);
@@ -336,7 +348,7 @@ get_vdev_desc(nvlist_t *nvroot, const char *parent_name) {
         (void) snprintf(vdev_desc, sizeof(vdev_desc), "%s",
                         vdev_value);
     } else {
-        s = escape_string(vdev_path);
+        s = escape_string((char *)vdev_path);
         (void) snprintf(vdev_desc, sizeof(vdev_desc), "path=%s,%s",
                         s, vdev_value);
         free(s);

@@ -1,0 +1,8 @@
+# cmake in-source build artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# built executable
+/zpool_influxdb

@@ -1,10 +1,38 @@
 # Influxdb Metrics for ZFS Pools
+
+> **Note:** This is a fork of
+> [richardelling/zpool_influxdb](https://github.com/richardelling/zpool_influxdb).
+> It updates the original so it builds against modern OpenZFS releases
+> (verified on ZFS 2.1 / Debian 12 through ZFS 2.4) and recent
+> compilers/glibc. See [Changes in this fork](#changes-in-this-fork) for
+> details. All credit for the original program goes to Richard Elling.
+
 The _zpool_influxdb_ program produces 
 [influxdb](https://github.com/influxdata/influxdb) line protocol
 compatible metrics from zpools. In the UNIX tradition, _zpool_influxdb_
 does one thing: read statistics from a pool and print them to
 stdout. In many ways, this is a metrics-friendly output of 
 statistics normally observed via the `zpool` command.
+
+## Changes in this fork
+Relative to the upstream repository:
+* **Builds on modern OpenZFS.** The libzfs `nvlist_lookup_string()` signature
+  gained a `const` qualifier in OpenZFS 2.2. The build now detects the
+  signature at configure time, so the same source compiles cleanly on ZFS 2.1
+  (Debian 12's `char **`) and ZFS 2.2+ (`const char **`).
+* **Modern glibc fix.** Builds with `-D_LARGEFILE64_SOURCE` so the libspl
+  headers can use the transitional `stat64()`/`fstat64()` interfaces.
+* **Removed a stale scan field.** The `to_process` field was dropped from
+  `zpool_scan_stats`; the corresponding `pss_to_process` member no longer
+  exists in `pool_scan_stat_t`.
+* **Sensible defaults.** `ZFS_INSTALL_BASE` now defaults to `/usr` (matching
+  distribution packages); override it for source installs.
+* **CPU target option.** A new `TARGET_ARCH` cmake variable controls `-march`
+  and defaults to `x86-64-v4`. See
+  [Target CPU architecture](#target-cpu-architecture).
+
+Verified building and running on Debian 12 (bookworm, GCC 12.2, ZFS 2.1.11)
+and CachyOS/Arch (GCC 16, ZFS 2.4.2).
 
 ## ZFS Versions
 There are many implementations of ZFS on many OSes. The current
@@ -106,7 +134,6 @@ cannot be reported by this collector.
 | to_examine | bytes | prediction of total bytes to be scanned |
 | pass_examined | bytes | data examined during current scan pass |
 | processed | bytes | data reconstructed during scan |
-| to_process | bytes | total bytes to be repaired |
 | rate | bytes/sec | examination rate |
 | start_ts | epoch timestamp | start timestamp for scan |
 | pause_ts | epoch timestamp | timestamp for a scan pause request |
@@ -228,18 +255,56 @@ unsigned integers. To support unsigned, define SUPPORT_UINT64 and compile
 as described in `CMakeLists.txt`
 
 ## Building
-Building is simplified by using cmake.
-It is as simple as possible, but no simpler.
-By default, [ZFSonLinux](https://github.com/zfsonlinux/zfs) 
-installs the necessary header and library files in _/usr/local_.
-If you place those files elsewhere, either edit _CMakeLists.txt_ and
-change the _ZFS_INSTALL_BASE_ or pass it with `-D ZFS_INSTALL_BASE=/usr`
-on the cmake command line:
+Building uses cmake and needs a C compiler, the libzfs/libspl development
+headers, and the libzfs and libnvpair libraries.
+
+### 1. Install build dependencies
+
+Debian / Ubuntu (the ZFS packages are in `contrib`):
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential cmake libzfslinux-dev
+```
+
+Arch / CachyOS (ZFS is provided by the `zfs-dkms`/`zfs-utils` packages or the
+AUR; these install the libzfs headers):
+```bash
+sudo pacman -S --needed base-devel cmake zfs-utils
+```
+
+For a source install of [OpenZFS](https://github.com/openzfs/zfs), make sure
+`make install` placed the libzfs headers and libraries on the system.
+
+### 2. Configure and build
 ```bash
 cmake .
 make
 ```
-If successful, the _zpool_influxdb_ executable is created.
+If successful, the _zpool_influxdb_ executable is created in the current
+directory.
+
+Distribution packages install the headers and libraries under _/usr_, which is
+the default _ZFS_INSTALL_BASE_. A source install of OpenZFS defaults to
+_/usr/local_; in that case (or any other location) either edit _CMakeLists.txt_
+and change _ZFS_INSTALL_BASE_ or pass it on the cmake command line:
+```bash
+cmake -D ZFS_INSTALL_BASE=/usr/local .
+make
+```
+
+The libzfs API is unstable and has changed across OpenZFS releases. The build
+adapts at configure time (e.g. the `nvlist_lookup_string()` signature changed in
+OpenZFS 2.2) so the same source compiles on ZFS 2.1 (e.g. Debian 12) through
+current releases.
+
+### Target CPU architecture
+By default the binary is compiled for the `x86-64-v4` microarchitecture
+(AVX-512 baseline). Such a binary will not run on CPUs below that level. To
+target a different level or a fully portable baseline, set _TARGET_ARCH_:
+```bash
+cmake -D TARGET_ARCH=x86-64-v3 .   # AVX2 baseline
+cmake -D TARGET_ARCH= .             # compiler default (most portable)
+```
 
 ## Installing
 Installation is left as an exercise for the reader because
