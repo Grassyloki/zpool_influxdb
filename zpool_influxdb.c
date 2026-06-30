@@ -112,7 +112,8 @@ int no_histograms = 0;
 int sum_histogram_buckets = 0;
 int timeout_secs = 0;       /* watchdog timeout in seconds, 0 = disabled */
 char *lock_file = NULL;     /* single-instance lock file path, NULL = disabled */
-int iostat_interval = 0;    /* zpool-iostat sampling interval, 0 = disabled */
+int iostat_interval = 1;    /* zpool-iostat sampling interval (s); 0 disables.
+                             * Default 1 adds ~1s/run to emit zpool_iostat. */
 uint64_t timestamp = 0;
 
 /*
