@@ -2,10 +2,11 @@
 
 > **Note:** This is a fork of
 > [richardelling/zpool_influxdb](https://github.com/richardelling/zpool_influxdb).
-> It updates the original so it builds against modern OpenZFS releases
-> (verified on ZFS 2.1 / Debian 12 through ZFS 2.4) and recent
-> compilers/glibc. See [Changes in this fork](#changes-in-this-fork) for
-> details. All credit for the original program goes to Richard Elling.
+> It updates the original so it builds and runs on modern OpenZFS releases and
+> recent compilers/glibc. It is used on TrueNAS 26 (Community Edition) with
+> OpenZFS 2.4, and the source is verified from OpenZFS 2.1 (Debian 12) through
+> OpenZFS 2.4. See [Changes in this fork](#changes-in-this-fork) for details.
+> All credit for the original program goes to Richard Elling.
 
 The _zpool_influxdb_ program produces 
 [influxdb](https://github.com/influxdata/influxdb) line protocol
@@ -41,17 +42,15 @@ Relative to the upstream repository:
   default (`--iostat-interval=1`); pass `--iostat-interval=0` to disable. See
   [zpool_iostat Description](#zpool_iostat-description).
 
-Verified building and running on Debian 12 (bookworm, GCC 12.2, ZFS 2.1.11)
-and CachyOS/Arch (GCC 16, ZFS 2.4.2).
+Verified building on Debian 12 (bookworm, GCC 12.2, ZFS 2.1.11) and CachyOS
+(GCC 16, ZFS 2.4.2), and running on TrueNAS 26 (OpenZFS 2.4.1).
 
 ## ZFS Versions
-There are many implementations of ZFS on many OSes. The current
-version is tested to work on:
-* [ZFSonLinux](https://github.com/zfsonlinux/zfs) version 0.7 and later
-* [cstor](https://github.com/openebs/cstor) for userland ZFS (uZFS)
-
-This should compile and run on other ZFS versions, though many 
-do not have the latency histograms. Pull requests are welcome.
+ZFS on Linux is now part of [OpenZFS](https://github.com/openzfs/zfs). This
+fork is used on TrueNAS 26 (Community Edition) with OpenZFS 2.4, and the source
+is built and verified against OpenZFS 2.1 through 2.4. It should also compile
+and run on other OpenZFS releases, though some older versions lack the latency
+histograms. Pull requests are welcome.
 
 ## Usage
 When run without arguments, _zpool_influxdb_ runs once, reading data
@@ -187,8 +186,8 @@ The ZFS I/O (ZIO) scheduler uses five queues to schedule I/Os to each vdev.
 These queues are further divided into active and pending states.
 An I/O is pending prior to being issued to the vdev. An active
 I/O has been issued to the vdev. The scheduler and its tunable
-parameters are described at the 
-[ZFS on Linux wiki.](https://github.com/zfsonlinux/zfs/wiki/ZIO-Scheduler)
+parameters are described in the
+[OpenZFS documentation.](https://openzfs.github.io/openzfs-docs/Performance%20and%20Tuning/ZIO%20Scheduler.html)
 The ZIO scheduler reports the queue depths as gauges where the value 
 represents an instantaneous snapshot of the queue depth at 
 the sample time. Therefore, it is not unusual to see all zeroes
@@ -399,7 +398,7 @@ be restarted to read the config-directory files.
   there are bugs in the kernel modules.
 
   A single wedged sample is a kernel-side condition that no user-space
-  program can reliably interrupt -- a thread stuck in an uninterruptible
+  program can reliably interrupt; a thread stuck in an uninterruptible
   `ioctl()` cannot be killed by a signal or a timeout. What you *can* avoid
   is letting frequent polling pile up many of these commands so they
   contend with each other and make matters worse. This fork adds two options
